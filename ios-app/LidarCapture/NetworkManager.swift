@@ -11,7 +11,7 @@ class NetworkManager: ObservableObject {
     @Published var isConnected = false
     @Published var pointCloudDensity = 5
     
-    private var serverURL: String = "http://localhost:5000"
+    private var serverURL: String = "http://192.168.1.42:5000"
     private var cancellables = Set<AnyCancellable>()
     
     init() {
