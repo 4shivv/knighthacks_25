@@ -27,7 +27,6 @@ def upload_lidar():
     try:
         data = request.get_json()
         
-        # Validate data
         if not data or 'points' not in data:
             return jsonify({'error': 'Invalid data format'}), 400
         
