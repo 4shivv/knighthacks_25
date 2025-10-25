@@ -141,7 +141,7 @@
     <axis xyz="0 1 0"/>
   </joint>
 
-  <!-- Caster Wheel (front) -->
+  <!-- Caster Wheel -->
   <link name="caster_wheel">
     <visual>
       <geometry>
@@ -169,56 +169,28 @@
     <origin xyz="0.2 0 -0.15" rpy="0 0 0"/>
   </joint>
 
-  <!-- Gazebo Materials -->
-  <gazebo reference="base_link">
-    <material>Gazebo/Blue</material>
-  </gazebo>
-
-  <gazebo reference="left_wheel">
-    <material>Gazebo/Grey</material>
-    <mu1>1.0</mu1>
-    <mu2>1.0</mu2>
-  </gazebo>
-
-  <gazebo reference="right_wheel">
-    <material>Gazebo/Grey</material>
-    <mu1>1.0</mu1>
-    <mu2>1.0</mu2>
-  </gazebo>
-
-  <gazebo reference="caster_wheel">
-    <material>Gazebo/Grey</material>
-    <mu1>0.1</mu1>
-    <mu2>0.1</mu2>
-  </gazebo>
-
-  <!-- Differential Drive Plugin -->
+  <!-- Gazebo Sim Plugins -->
   <gazebo>
-    <plugin name="diff_drive" filename="libgazebo_ros_diff_drive.so">
-      <update_rate>50</update_rate>
+    <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
       <left_joint>left_wheel_joint</left_joint>
       <right_joint>right_wheel_joint</right_joint>
       <wheel_separation>0.45</wheel_separation>
       <wheel_diameter>0.2</wheel_diameter>
-      <max_wheel_torque>20</max_wheel_torque>
-      <max_wheel_acceleration>1.0</max_wheel_acceleration>
-      <command_topic>cmd_vel</command_topic>
-      <publish_odom>true</publish_odom>
-      <publish_odom_tf>true</publish_odom_tf>
-      <publish_wheel_tf>false</publish_wheel_tf>
-      <odometry_topic>odom</odometry_topic>
-      <odometry_frame>odom</odometry_frame>
-      <robot_base_frame>base_link</robot_base_frame>
+      <max_linear_acceleration>1.0</max_linear_acceleration>
+      <max_angular_acceleration>2.0</max_angular_acceleration>
+      <topic>/cmd_vel</topic>
+      <odom_topic>/odom</odom_topic>
+      <frame_id>odom</frame_id>
+      <child_frame_id>base_link</child_frame_id>
     </plugin>
   </gazebo>
 
-  <!-- LiDAR Sensor Plugin -->
+  <!-- LiDAR Sensor -->
   <gazebo reference="lidar_link">
-    <sensor name="lidar" type="ray">
-      <pose>0 0 0 0 0 0</pose>
-      <visualize>true</visualize>
+    <sensor name="lidar" type="gpu_lidar">
+      <topic>/scan</topic>
       <update_rate>10</update_rate>
-      <ray>
+      <lidar>
         <scan>
           <horizontal>
             <samples>360</samples>
@@ -232,29 +204,17 @@
           <max>15.0</max>
           <resolution>0.01</resolution>
         </range>
-        <noise>
-          <type>gaussian</type>
-          <mean>0.0</mean>
-          <stddev>0.01</stddev>
-        </noise>
-      </ray>
-      <plugin name="lidar_controller" filename="libgazebo_ros_ray_sensor.so">
-        <output_type>sensor_msgs/LaserScan</output_type>
-        <frame_name>lidar_link</frame_name>
-        <ros>
-          <namespace>/</namespace>
-          <remapping>~/out:=scan</remapping>
-        </ros>
-      </plugin>
+      </lidar>
+      <visualize>true</visualize>
     </sensor>
   </gazebo>
 
-  <!-- Camera Sensor Plugin -->
+  <!-- Camera Sensor -->
   <gazebo reference="camera_link">
     <sensor name="camera" type="camera">
+      <topic>/camera/image_raw</topic>
       <update_rate>30</update_rate>
-      <visualize>true</visualize>
-      <camera name="front_camera">
+      <camera>
         <horizontal_fov>1.3962634</horizontal_fov>
         <image>
           <width>640</width>
@@ -265,20 +225,8 @@
           <near>0.02</near>
           <far>300</far>
         </clip>
-        <noise>
-          <type>gaussian</type>
-          <mean>0.0</mean>
-          <stddev>0.007</stddev>
-        </noise>
       </camera>
-      <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
-        <frame_name>camera_link</frame_name>
-        <ros>
-          <namespace>/</namespace>
-          <remapping>~/image_raw:=camera/image_raw</remapping>
-          <remapping>~/camera_info:=camera/camera_info</remapping>
-        </ros>
-      </plugin>
+      <visualize>true</visualize>
     </sensor>
   </gazebo>
 
