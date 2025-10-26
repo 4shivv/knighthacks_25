@@ -283,15 +283,20 @@
       const [pointCloudQuality, setPointCloudQuality] = useState('High');
       const [lastScanId, setLastScanId] = useState(null);
       const [scanCount, setScanCount] = useState(0);
-      
+
       // Mission control states
       const [missionActive, setMissionActive] = useState(false);
       const [missionStatus, setMissionStatus] = useState('IDLE');
       const [missionProgress, setMissionProgress] = useState(0);
-      
+
+      // Detection states
+      const [detections, setDetections] = useState([]);
+
       const logRef = useRef(null);
       const pollInterval = useRef(null);
       const imgRef = useRef(null);
+      const canvasRef = useRef(null);
+      const videoContainerRef = useRef(null);
 
       const testConnection = async () => {
         try {
@@ -396,7 +401,7 @@
 
       const fetchMissionStatus = async () => {
         if (!missionActive) return;
-        
+
         try {
           const response = await fetch(`${backendUrl}/api/mission_status`);
           if (response.ok) {
@@ -417,24 +422,102 @@
         }
       };
 
+      const fetchDetections = async () => {
+        try {
+          const response = await fetch(`${backendUrl}/api/detections`);
+          if (response.ok) {
+            const data = await response.json();
+            if (data.objects && data.objects.length > 0) {
+              setDetections(data.objects);
+            } else {
+              setDetections([]);
+            }
+          }
+        } catch (error) {
+          console.error('Failed to fetch detections:', error);
+        }
+      };
+
+      const drawDetections = () => {
+        const canvas = canvasRef.current;
+        const img = imgRef.current;
+        const container = videoContainerRef.current;
+
+        if (!canvas || !img || !container || detections.length === 0) return;
+
+        const ctx = canvas.getContext('2d');
+
+        // Match canvas size to image display size
+        const rect = img.getBoundingClientRect();
+        canvas.width = rect.width;
+        canvas.height = rect.height;
+
+        // Clear canvas
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Get image natural size for scaling
+        const scaleX = rect.width / img.naturalWidth;
+        const scaleY = rect.height / img.naturalHeight;
+
+        // Draw each detection
+        detections.forEach((detection) => {
+          const [x, y, width, height] = detection.bbox;
+
+          // Scale bbox to display size
+          const scaledX = x * scaleX;
+          const scaledY = y * scaleY;
+          const scaledW = width * scaleX;
+          const scaledH = height * scaleY;
+
+          // Draw bounding box
+          ctx.strokeStyle = colors.accent;
+          ctx.lineWidth = 3;
+          ctx.strokeRect(scaledX, scaledY, scaledW, scaledH);
+
+          // Draw label background
+          const label = `${detection.label} ${(detection.confidence * 100).toFixed(0)}%`;
+          const depth = detection.depth ? ` ${detection.depth.toFixed(1)}m` : '';
+          const fullLabel = label + depth;
+
+          ctx.font = 'bold 14px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto';
+          const textMetrics = ctx.measureText(fullLabel);
+          const textWidth = textMetrics.width + 12;
+          const textHeight = 22;
+
+          // Label background
+          ctx.fillStyle = colors.accent;
+          ctx.fillRect(scaledX, scaledY - textHeight - 4, textWidth, textHeight);
+
+          // Label text
+          ctx.fillStyle = colors.bg;
+          ctx.fillText(fullLabel, scaledX + 6, scaledY - 8);
+        });
+      };
+
       const clearLog = () => {
         setActions([]);
       };
 
       useEffect(() => {
         testConnection();
-        
+
         pollInterval.current = setInterval(() => {
           if (isConnected) {
             fetchScans();
             fetchMissionStatus();
+            fetchDetections(); // Poll detections every 500ms
           }
         }, 500);
-        
+
         return () => {
           if (pollInterval.current) clearInterval(pollInterval.current);
         };
       }, [backendUrl, isConnected, lastScanId, missionActive]);
+
+      // Redraw detections whenever they change or image loads
+      useEffect(() => {
+        drawDetections();
+      }, [detections, streamActive]);
 
       useEffect(() => {
         if (logRef.current) {
@@ -731,30 +814,46 @@
             </div>
 
             {/* Camera Feed */}
-            <div className="glass glow" style={{
-              flex: 1,
-              borderRadius: '16px',
-              overflow: 'hidden',
-              position: 'relative',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              minHeight: 0,
-              border: `2px solid ${colors.borderDim}`
-            }}>
+            <div
+              ref={videoContainerRef}
+              className="glass glow"
+              style={{
+                flex: 1,
+                borderRadius: '16px',
+                overflow: 'hidden',
+                position: 'relative',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                minHeight: 0,
+                border: `2px solid ${colors.borderDim}`
+              }}>
               {isConnected ? (
-                <img
-                  ref={imgRef}
-                  src={`${backendUrl}/api/stream`}
-                  alt="Robot Camera Stream"
-                  onError={handleImageError}
-                  onLoad={handleImageLoad}
-                  style={{
-                    width: '100%',
-                    height: '100%',
-                    objectFit: 'contain'
-                  }}
-                />
+                <>
+                  <img
+                    ref={imgRef}
+                    src={`${backendUrl}/api/stream`}
+                    alt="Robot Camera Stream"
+                    onError={handleImageError}
+                    onLoad={handleImageLoad}
+                    style={{
+                      width: '100%',
+                      height: '100%',
+                      objectFit: 'contain'
+                    }}
+                  />
+                  {/* Canvas overlay for bounding boxes */}
+                  <canvas
+                    ref={canvasRef}
+                    style={{
+                      position: 'absolute',
+                      top: '50%',
+                      left: '50%',
+                      transform: 'translate(-50%, -50%)',
+                      pointerEvents: 'none'
+                    }}
+                  />
+                </>
               ) : (
                 <div style={{
                   textAlign: 'center',

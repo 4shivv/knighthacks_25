@@ -6,6 +6,7 @@ Processes camera frames with YOLO and stores detections in state manager.
 import asyncio
 import logging
 import time
+import math
 from typing import Optional
 import numpy as np
 import cv2
@@ -146,19 +147,31 @@ class DetectionLoop:
 
                 for detection in filtered_detections:
                     # Create DetectedObject (imported at top of file)
-                    # Get depth from LiDAR if available
+                    # Get depth from fused depth map (preferred) or LiDAR heuristic (fallback)
                     depth = None
-                    if lidar_data:
-                        # TODO: In Phase 3 (Sensor Fusion), we'll properly align
-                        # LiDAR depth with camera pixels. For now, use placeholder.
-                        # You can estimate depth from LiDAR point cloud center
+
+                    # OPTION 1: Try using fused depth map (most accurate)
+                    fused_data = self.state_manager.get_fused_data()
+                    if fused_data and fused_data.get('depth_map') is not None:
+                        depth = self._get_depth_from_fusion(detection, fused_data['depth_map'])
+                        if depth:
+                            logger.debug(f"Using fused depth map: {depth:.2f}m for {detection['label']}")
+
+                    # OPTION 2: Fallback to LiDAR heuristic if fusion unavailable
+                    if depth is None and lidar_data:
                         depth = self._estimate_depth_from_lidar(detection, lidar_data)
+                        if depth:
+                            logger.debug(f"Using LiDAR heuristic: {depth:.2f}m for {detection['label']}")
+
+                    # Calculate position from depth and bbox
+                    position = self._calculate_position_from_detection(detection, depth)
 
                     obj = DetectedObject(
                         label=detection['label'],
                         confidence=detection['confidence'],
                         bbox=detection['bbox'],
                         depth=depth,
+                        position=position,
                         timestamp=current_time
                     )
 
@@ -188,6 +201,118 @@ class DetectionLoop:
             await asyncio.sleep(self.interval_seconds)
 
         logger.info("Detection loop stopped")
+
+    def _calculate_position_from_detection(self, detection: dict, depth: Optional[float]) -> Optional['Position']:
+        """
+        Calculate 3D position of detected object from bbox and depth.
+
+        Args:
+            detection: Detection dict with bbox [x, y, width, height]
+            depth: Depth in meters (from LiDAR)
+
+        Returns:
+            Position object or None if depth unavailable
+        """
+        if depth is None:
+            return None
+
+        # Import here to avoid circular imports
+        from state_manager import Position
+
+        # Get bbox center in normalized coordinates [0-1]
+        bbox = detection['bbox']
+        center_x = bbox[0] + bbox[2] / 2  # x + width/2
+        center_y = bbox[1] + bbox[3] / 2  # y + height/2
+
+        # Convert to angle offset from camera center
+        # Assuming 60° horizontal FOV (typical for phone cameras)
+        horizontal_fov_deg = 60.0
+        vertical_fov_deg = 45.0  # Approximate for 4:3 or 16:9
+
+        # Angle from center (in radians)
+        angle_x = (center_x - 0.5) * math.radians(horizontal_fov_deg)
+        angle_y = (center_y - 0.5) * math.radians(vertical_fov_deg)
+
+        # Calculate world position from robot's current position
+        # Assuming camera faces forward (same as robot heading)
+        from tools.odometry import odometry
+        robot_pos = odometry.get_position()  # (x, y, heading)
+        robot_heading = robot_pos[2]  # heading in radians
+
+        # Calculate absolute angle in world frame
+        object_angle = robot_heading + angle_x
+
+        # Calculate position relative to robot
+        dx = depth * math.cos(object_angle)
+        dy = depth * math.sin(object_angle)
+
+        # World position
+        world_x = robot_pos[0] + dx
+        world_y = robot_pos[1] + dy
+        world_z = 0.0  # Assuming ground plane
+
+        return Position(x=world_x, y=world_y, z=world_z)
+
+    def _get_depth_from_fusion(self, detection: dict, depth_map: np.ndarray) -> Optional[float]:
+        """
+        Get accurate depth from fused depth map created by fusion loop.
+
+        This is the PREFERRED method for depth estimation as it uses the aligned
+        camera-LiDAR depth map from the fusion loop (OpenCV projection).
+
+        Args:
+            detection: YOLO detection dict with bbox [x, y, width, height]
+            depth_map: 2D numpy array (H x W) with depth values in meters
+
+        Returns:
+            Median depth within bbox region in meters, or None
+        """
+        try:
+            # Extract bounding box in pixel coordinates
+            bbox = detection.get('bbox', [])
+            if len(bbox) != 4:
+                return None
+
+            x, y, width, height = bbox
+
+            # Get depth map dimensions
+            h, w = depth_map.shape
+
+            # Convert bbox to integer pixel coordinates
+            x1 = int(max(0, x))
+            y1 = int(max(0, y))
+            x2 = int(min(w, x + width))
+            y2 = int(min(h, y + height))
+
+            # Validate bbox bounds
+            if x2 <= x1 or y2 <= y1:
+                logger.debug("Invalid bbox dimensions")
+                return None
+
+            # Extract depth values within bounding box
+            bbox_depths = depth_map[y1:y2, x1:x2]
+
+            # Filter out invalid depths (0 = no data, >10m = too far)
+            valid_depths = bbox_depths[(bbox_depths > 0.1) & (bbox_depths < 10.0)]
+
+            if len(valid_depths) == 0:
+                logger.debug("No valid depth values in bbox region")
+                return None
+
+            # Use median for robustness to outliers
+            median_depth = float(np.median(valid_depths))
+
+            logger.debug(
+                f"Fused depth for {detection.get('label')}: {median_depth:.2f}m "
+                f"from {len(valid_depths)} valid pixels (bbox coverage: "
+                f"{100*len(valid_depths)/bbox_depths.size:.1f}%)"
+            )
+
+            return median_depth
+
+        except Exception as e:
+            logger.debug(f"Error getting depth from fusion: {e}")
+            return None
 
     def _estimate_depth_from_lidar(self, detection: dict, lidar_data: dict) -> Optional[float]:
         """

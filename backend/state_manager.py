@@ -17,6 +17,7 @@ class DetectedObject:
     confidence: float
     bbox: List[float]  # [x, y, width, height]
     depth: Optional[float] = None  # Distance in meters
+    position: Optional['Position'] = None  # 3D position in world coordinates
     timestamp: float = field(default_factory=time.time)
 
 
@@ -103,6 +104,11 @@ class StateManager:
         with self._lock:
             self.fused_data = data
             self.fused_timestamp = timestamp
+
+    def get_fused_data(self) -> Optional[Dict[str, Any]]:
+        """Get fused sensor data (depth map + occupancy grid)."""
+        with self._lock:
+            return self.fused_data
 
     def add_detected_object(self, obj: DetectedObject):
         """Add a detected object."""

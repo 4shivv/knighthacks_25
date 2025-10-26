@@ -3,7 +3,7 @@ Main FastAPI application entry point.
 Initializes all components and starts the server with concurrent loops.
 """
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import asyncio
@@ -27,6 +27,7 @@ from loops.detection_loop import DetectionLoop
 from loops.planning_loop import PlanningLoop
 from loops.motor_control_loop import MotorControlLoop
 from loops.path_planning_loop import PathPlanningLoop
+from loops.fusion_loop import FusionLoop
 
 # Tool imports
 from tools.odometry import odometry
@@ -45,10 +46,12 @@ detection_loop: DetectionLoop = None
 planning_loop: PlanningLoop = None
 motor_control_loop: MotorControlLoop = None
 path_planning_loop: PathPlanningLoop = None
+fusion_loop: FusionLoop = None
 detection_task: asyncio.Task = None
 planning_task: asyncio.Task = None
 motor_control_task: asyncio.Task = None
 path_planning_task: asyncio.Task = None
+fusion_task: asyncio.Task = None
 
 
 @asynccontextmanager
@@ -61,7 +64,7 @@ async def lifespan(app: FastAPI):
     logger.info("SERVER INITIALIZATION STARTED")
     logger.info("=" * 60)
 
-    global yolo_model, adk_session_manager, detection_loop, planning_loop, motor_control_loop, path_planning_loop, detection_task, planning_task, motor_control_task, path_planning_task
+    global yolo_model, adk_session_manager, detection_loop, planning_loop, motor_control_loop, path_planning_loop, fusion_loop, detection_task, planning_task, motor_control_task, path_planning_task, fusion_task
 
     # 1. Load YOLO model
     logger.info("Step 1: Loading YOLO model...")
@@ -148,6 +151,21 @@ async def lifespan(app: FastAPI):
     path_planning_task = asyncio.create_task(path_planning_loop.run())
     logger.info("✓ Path planning loop started (1000ms interval)")
 
+    # Create sensor fusion loop
+    fusion_loop = FusionLoop(
+        state_manager=state_manager,
+        grid_resolution=0.1,  # meters per cell (matches path planning)
+        grid_size_x=100,
+        grid_size_y=100,
+        max_obstacle_height=0.5,  # 0.5m max height
+        min_obstacle_height=0.05,  # 5cm min height
+        obstacle_threshold=5,  # minimum 5 points to mark as obstacle
+        interval_ms=500  # 2 Hz
+    )
+    # Start fusion loop as async task
+    fusion_task = asyncio.create_task(fusion_loop.run())
+    logger.info("✓ Sensor fusion loop started (500ms interval)")
+
     logger.info("=" * 60)
     logger.info("SERVER READY - Waiting for sensor input...")
     logger.info("=" * 60)
@@ -185,6 +203,12 @@ async def lifespan(app: FastAPI):
         path_planning_loop.running = False
         if path_planning_task and not path_planning_task.done():
             await path_planning_task
+
+    if fusion_loop:
+        logger.info("Stopping fusion loop...")
+        fusion_loop.running = False
+        if fusion_task and not fusion_task.done():
+            await fusion_task
 
     # End ADK session
     if adk_session_manager:
@@ -237,7 +261,8 @@ async def get_status():
             "detection": detection_loop.get_stats() if detection_loop else {"running": False},
             "planning": {"running": planning_loop.running} if planning_loop else {"running": False},
             "motor_control": motor_control_loop.get_stats() if motor_control_loop else {"running": False},
-            "path_planning": path_planning_loop.get_stats() if path_planning_loop else {"running": False}
+            "path_planning": path_planning_loop.get_stats() if path_planning_loop else {"running": False},
+            "fusion": fusion_loop.get_stats() if fusion_loop else {"running": False}
         },
         "mission": state_manager.get_mission_stats(),
         "state": state_manager.get_state_snapshot(),
@@ -256,9 +281,11 @@ async def get_mission_stats():
 
 
 @app.post("/api/mission/start")
-async def start_mission(objective: str = None):
-    """Start a new mission."""
-    obj = objective or settings.default_objective
+async def start_mission(payload: dict = Body(default={})):
+    """Start a new mission (frontend compatible)."""
+    # Accept mission from request body (frontend sends {"mission": "..."})
+    obj = payload.get("mission") or payload.get("objective") or settings.default_objective
+
     state_manager.start_mission(obj)
     logger.info(f"New mission started: {obj}")
     return {"status": "started", "objective": obj}
@@ -271,6 +298,57 @@ async def complete_mission():
     stats = state_manager.get_mission_stats()
     logger.info(f"Mission completed! Stats: {stats}")
     return {"status": "completed", "stats": stats}
+
+
+@app.post("/api/stop_mission")
+async def stop_mission():
+    """Stop the current mission (for frontend compatibility)."""
+    state_manager.mission_active = False
+    logger.info("Mission stopped by user")
+    return {"status": "stopped", "message": "Mission stopped successfully"}
+
+
+@app.get("/api/mission_status")
+async def get_mission_status():
+    """Get current mission status (for frontend polling)."""
+    stats = state_manager.get_mission_stats()
+
+    # Determine current action based on state
+    current_action = "Idle"
+    if state_manager.mission_active:
+        if state_manager.path_status == "PLANNING":
+            current_action = "Planning path to target"
+        elif state_manager.path_status == "PATH_FOUND":
+            current_action = "Navigating to target"
+        elif state_manager.path_status == "BLOCKED":
+            current_action = "Path blocked, replanning"
+        elif len(state_manager.detected_objects) > 0:
+            current_action = f"Analyzing {sum(len(objs) for objs in state_manager.detected_objects.values())} detected objects"
+        else:
+            current_action = "Scanning environment"
+
+    # Calculate progress (rough estimate based on detections and time)
+    progress = 0
+    if state_manager.mission_active:
+        # Base progress on mission time (cap at 80% until complete)
+        elapsed = stats.get("elapsed_time_seconds", 0)
+        progress = min(int((elapsed / 60.0) * 80), 80)  # 1 minute = 80% progress
+
+        # Boost progress if we have detections
+        if state_manager.target_object:
+            progress = 90  # Found target!
+
+    if state_manager.mission_complete:
+        progress = 100
+
+    return {
+        "status": "ACTIVE" if state_manager.mission_active else "IDLE",
+        "progress": progress,
+        "current_action": current_action,
+        "completed": state_manager.mission_complete,
+        "objective": state_manager.objective,
+        "stats": stats
+    }
 
 
 @app.get("/api/detections")
