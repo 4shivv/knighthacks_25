@@ -1,186 +1,36 @@
 from flask import Flask, render_template, request, jsonify, Response
-from flask_socketio import SocketIO, emit
 from flask_cors import CORS
-import json
-import base64
+from flask_socketio import SocketIO
+import json, time, threading, io
+import matplotlib.pyplot as plt
+import numpy as np
 from datetime import datetime
 from agents import LidarAnalysisAgent, DataProcessingAgent
 from database import db, LidarScan
 import config
+import matplotlib
+matplotlib.use("Agg")
 
 app = Flask(__name__)
 app.config.from_object(config.Config)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Initialize database
+# Initialize DB + agents
 db.init_app(app)
-
-# Initialize agents
 lidar_agent = LidarAnalysisAgent()
 processing_agent = DataProcessingAgent()
 
-# Store latest frame for streaming
+# Globals
 latest_frame = None
-frame_lock = None
-
-try:
-    import threading
-    frame_lock = threading.Lock()
-except:
-    pass
+latest_lidar_points = None
+frame_lock = threading.Lock()
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
-@app.route('/api/upload_lidar', methods=['POST'])
-def upload_lidar():
-    """Endpoint to receive LiDAR data from iOS app"""
-    try:
-        data = request.get_json()
-        
-        # Validate data
-        if not data or 'points' not in data:
-            return jsonify({'error': 'Invalid data format'}), 400
-        
-        # Process data with agent
-        processed_data = processing_agent.process_lidar_data(data)
-        
-        # Save to database
-        with app.app_context():
-            scan = LidarScan(
-                timestamp=datetime.utcnow(),
-                point_count=len(data['points']),
-                raw_data=json.dumps(data),
-                processed_data=json.dumps(processed_data)
-            )
-            db.session.add(scan)
-            db.session.commit()
-            scan_id = scan.id
-        
-        # Analyze with AI agent
-        analysis = lidar_agent.analyze_scan(processed_data)
-        
-        # Format analysis for iOS (convert to simple string)
-        analysis_text = format_analysis_for_client(analysis)
-        
-        # Broadcast to connected clients
-        socketio.emit('new_lidar_data', {
-            'scan_id': scan_id,
-            'data': processed_data,
-            'analysis': analysis,
-            'timestamp': datetime.utcnow().isoformat()
-        })
-        
-        return jsonify({
-            'success': True,
-            'scan_id': scan_id,
-            'analysis': analysis_text
-        }), 200
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/scans', methods=['GET'])
-def get_scans():
-    """Get all LiDAR scans"""
-    try:
-        scans = LidarScan.query.order_by(LidarScan.timestamp.desc()).limit(50).all()
-        return jsonify({
-            'scans': [{
-                'id': scan.id,
-                'timestamp': scan.timestamp.isoformat(),
-                'point_count': scan.point_count
-            } for scan in scans]
-        }), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/scan/<int:scan_id>', methods=['GET'])
-def get_scan(scan_id):
-    """Get specific scan data"""
-    try:
-        scan = LidarScan.query.get_or_404(scan_id)
-        return jsonify({
-            'id': scan.id,
-            'timestamp': scan.timestamp.isoformat(),
-            'point_count': scan.point_count,
-            'data': json.loads(scan.processed_data)
-        }), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/analyze/<int:scan_id>', methods=['POST'])
-def analyze_scan(scan_id):
-    """Trigger AI analysis on a specific scan"""
-    try:
-        scan = LidarScan.query.get_or_404(scan_id)
-        processed_data = json.loads(scan.processed_data)
-        
-        analysis = lidar_agent.analyze_scan(processed_data)
-        
-        return jsonify({
-            'scan_id': scan_id,
-            'analysis': analysis
-        }), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@socketio.on('connect')
-def handle_connect():
-    print('Client connected')
-    emit('connection_response', {'status': 'connected'})
-
-@socketio.on('disconnect')
-def handle_disconnect():
-    print('Client disconnected')
-
-def format_analysis_for_client(analysis):
-    """Format analysis dictionary into a readable string for iOS client"""
-    if isinstance(analysis, str):
-        return analysis
-    
-    if not isinstance(analysis, dict):
-        return str(analysis)
-    
-    parts = []
-    
-    # Extract raw analysis
-    if 'raw_analysis' in analysis:
-        parts.append(analysis['raw_analysis'])
-    
-    # Add confidence if available
-    if 'confidence' in analysis:
-        confidence_pct = analysis['confidence'] * 100
-        parts.append(f"\n✓ Confidence: {confidence_pct:.1f}%")
-    
-    # Add structured analysis if available
-    if 'structured' in analysis and isinstance(analysis['structured'], dict):
-        structured = analysis['structured']
-        if 'description' in structured:
-            parts.append(f"\n📊 {structured['description']}")
-        if 'quality' in structured:
-            parts.append(f"Quality: {structured['quality']}")
-        if 'recommendations' in structured and isinstance(structured['recommendations'], list):
-            parts.append(f"\n💡 Recommendations:")
-            for rec in structured['recommendations']:
-                parts.append(f"  • {rec}")
-    
-    # Add fallback analysis if available
-    if 'fallback_analysis' in analysis and isinstance(analysis['fallback_analysis'], dict):
-        fallback = analysis['fallback_analysis']
-        if 'description' in fallback:
-            parts.append(fallback['description'])
-        if 'quality' in fallback:
-            parts.append(f"Quality: {fallback['quality']}")
-    
-    return '\n'.join(parts) if parts else 'Analysis completed successfully'
-
-
-latest_frame = None
-frame_lock = threading.Lock()
-
+# ---------------- CAMERA STREAM ----------------
 @app.route("/api/upload_frame", methods=["POST"])
 def upload_frame():
     """Receive live camera frame from iOS device"""
@@ -188,19 +38,16 @@ def upload_frame():
     try:
         if not request.data:
             return jsonify({"error": "No image data"}), 400
-        
-        # Save binary JPEG frame
         with frame_lock:
             latest_frame = request.data
-
         return jsonify({"success": True}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/stream")
-def stream_feed():
-    """Stream MJPEG camera feed to dashboard"""
+@app.route("/api/stream_camera")
+def stream_camera():
+    """Stream MJPEG camera feed"""
     def generate():
         global latest_frame
         while True:
@@ -210,11 +57,70 @@ def stream_feed():
                 yield (b"--frame\r\n"
                        b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
             else:
-                # Send blank placeholder
-                import time
                 time.sleep(0.05)
-
     return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+# ---------------- LIDAR STREAM ----------------
+@app.route("/api/upload_lidar_frame", methods=["POST"])
+def upload_lidar_frame():
+    """Receive LiDAR JSON points from iOS app"""
+    global latest_lidar_points
+    try:
+        data = request.get_json()
+        if not data or "points" not in data:
+            return jsonify({"error": "Invalid JSON"}), 400
+        pts = np.array([[p["x"], p["y"], p["z"]] for p in data["points"]])
+        latest_lidar_points = pts
+        return jsonify({"success": True, "count": len(pts)}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/stream_lidar")
+def stream_lidar():
+    """Render LiDAR points as scatter MJPEG stream"""
+    def generate():
+        global latest_lidar_points
+        while True:
+            if latest_lidar_points is not None and len(latest_lidar_points) > 0:
+                pts = latest_lidar_points
+
+                # Create scatter plot
+                fig, ax = plt.subplots(figsize=(5, 5))
+                ax.scatter(pts[:, 0], pts[:, 1], c=pts[:, 2], cmap='plasma', s=4)
+                ax.set_xlim(np.min(pts[:, 0]) - 0.5, np.max(pts[:, 0]) + 0.5)
+                ax.set_ylim(np.min(pts[:, 1]) - 0.5, np.max(pts[:, 1]) + 0.5)
+                ax.axis('off')
+                plt.tight_layout(pad=0)
+
+                # Convert to JPEG
+                buf = io.BytesIO()
+                fig.savefig(buf, format='jpeg', dpi=80)
+                plt.close(fig)
+                frame = buf.getvalue()
+                buf.close()
+
+                yield (b"--frame\r\n"
+                       b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+            else:
+                time.sleep(0.1)
+    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+# ---------------- SCAN DATA ----------------
+@app.route('/api/scans', methods=['GET'])
+def get_scans():
+    try:
+        scans = LidarScan.query.order_by(LidarScan.timestamp.desc()).limit(50).all()
+        return jsonify({
+            'scans': [{
+                'id': s.id,
+                'timestamp': s.timestamp.isoformat(),
+                'point_count': s.point_count
+            } for s in scans]
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 
 if __name__ == '__main__':
     with app.app_context():
