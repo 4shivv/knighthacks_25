@@ -14,6 +14,10 @@
 		84268B1B2EACAA05006EE07D /* LidarPoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84268B1A2EACAA05006EE07D /* LidarPoint.swift */; };
 		84268B1D2EACAA78006EE07D /* LidarCaptureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84268B1C2EACAA78006EE07D /* LidarCaptureView.swift */; };
 		84268B1F2EACABEC006EE07D /* NetworkManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84268B1E2EACABEC006EE07D /* NetworkManager.swift */; };
+		847ADC932EADA62D0031461D /* LocalWebServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 847ADC922EADA62D0031461D /* LocalWebServer.swift */; };
+		847ADC952EADA9260031461D /* ScanHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 847ADC942EADA9260031461D /* ScanHistoryView.swift */; };
+		847ADC972EADA9390031461D /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 847ADC962EADA9390031461D /* SettingsView.swift */; };
+		847ADC992EADA9BF0031461D /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 847ADC982EADA9BF0031461D /* Models.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -26,6 +30,10 @@
 		84268B1C2EACAA78006EE07D /* LidarCaptureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LidarCaptureView.swift; sourceTree = "<group>"; };
 		84268B1E2EACABEC006EE07D /* NetworkManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkManager.swift; sourceTree = "<group>"; };
 		84268B202EACACC0006EE07D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		847ADC922EADA62D0031461D /* LocalWebServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalWebServer.swift; sourceTree = "<group>"; };
+		847ADC942EADA9260031461D /* ScanHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanHistoryView.swift; sourceTree = "<group>"; };
+		847ADC962EADA9390031461D /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		847ADC982EADA9BF0031461D /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -62,8 +70,12 @@
 				84268B0A2EACA946006EE07D /* LidarCaptureApp.swift */,
 				84268B1A2EACAA05006EE07D /* LidarPoint.swift */,
 				84268B0C2EACA946006EE07D /* ContentView.swift */,
+				847ADC922EADA62D0031461D /* LocalWebServer.swift */,
+				847ADC942EADA9260031461D /* ScanHistoryView.swift */,
+				847ADC962EADA9390031461D /* SettingsView.swift */,
 				84268B1C2EACAA78006EE07D /* LidarCaptureView.swift */,
 				84268B1E2EACABEC006EE07D /* NetworkManager.swift */,
+				847ADC982EADA9BF0031461D /* Models.swift */,
 				84268B0E2EACA948006EE07D /* Assets.xcassets */,
 				84268B102EACA948006EE07D /* Preview Content */,
 			);
@@ -122,6 +134,10 @@
 				Base,
 			);
 			mainGroup = 84268AFE2EACA945006EE07D;
+			packageReferences = (
+				847ADC8E2EADA19F0031461D /* XCRemoteSwiftPackageReference "GCDWebServer" */,
+				847ADC912EADA5380031461D /* XCRemoteSwiftPackageReference "vapor" */,
+			);
 			productRefGroup = 84268B082EACA946006EE07D /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -149,9 +165,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				84268B1D2EACAA78006EE07D /* LidarCaptureView.swift in Sources */,
+				847ADC972EADA9390031461D /* SettingsView.swift in Sources */,
+				847ADC932EADA62D0031461D /* LocalWebServer.swift in Sources */,
 				84268B1B2EACAA05006EE07D /* LidarPoint.swift in Sources */,
 				84268B1F2EACABEC006EE07D /* NetworkManager.swift in Sources */,
 				84268B0D2EACA946006EE07D /* ContentView.swift in Sources */,
+				847ADC992EADA9BF0031461D /* Models.swift in Sources */,
+				847ADC952EADA9260031461D /* ScanHistoryView.swift in Sources */,
 				84268B0B2EACA946006EE07D /* LidarCaptureApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -362,6 +382,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		847ADC8E2EADA19F0031461D /* XCRemoteSwiftPackageReference "GCDWebServer" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/swisspol/GCDWebServer.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 3.5.4;
+			};
+		};
+		847ADC912EADA5380031461D /* XCRemoteSwiftPackageReference "vapor" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/vapor/vapor.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 4.117.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
 	};
 	rootObject = 84268AFF2EACA945006EE07D /* Project object */;
 }
