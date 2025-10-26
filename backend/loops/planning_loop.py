@@ -1,11 +1,14 @@
 """
 Planning/Reasoning Loop (runs at 1 Hz)
-Uses ADK agent to generate navigation instructions based on sensor data.
+Uses ADK agent to generate motor commands for RC car navigation based on sensor data and D* Lite pathfinding.
 """
 
 import asyncio
 import logging
+import json
 from typing import Optional
+from config import settings
+from agents.navigation_agent import prepare_agent_state
 
 logger = logging.getLogger(__name__)
 
@@ -62,28 +65,55 @@ class PlanningLoop:
 
                 logger.debug(f"Planning with {len(detected_objects)} detected objects")
 
+                # STEP 5.1a: Check for mission success (deterministic)
+                success_result = self._check_mission_success(detected_objects)
+                if success_result['mission_complete']:
+                    logger.info(f"Mission success detected: {success_result['message']}")
+                    # Mark mission complete
+                    self.state_manager.complete_mission(found_object=success_result.get('found_object'))
+                    # Send STOP command
+                    stop_command = {
+                        "command": "STOP",
+                        "reason": "MISSION_COMPLETE",
+                        "found_object": success_result['object_label'],
+                        "distance": success_result['distance'],
+                        "confidence": success_result['confidence']
+                    }
+                    self.state_manager.add_motor_command(stop_command)
+                    logger.info(f"STOP command issued: {stop_command}")
+                    # Skip rest of planning cycle
+                    await asyncio.sleep(self.interval_seconds)
+                    continue
+
                 # STEP 5.2: Build context for ADK agent
-                # Prepare agent state from state manager
-                from agents.navigation_agent import prepare_agent_state
+                # Prepare agent state from state manager (imported at top of file)
                 agent_state = prepare_agent_state(self.state_manager)
 
                 # STEP 5.3: Update ADK session state
                 await self.adk_session_manager.update_session_state(agent_state)
 
                 # STEP 5.4: Call ADK agent (this includes Gemini API call)
-                instruction = await self.adk_session_manager.run_agent(
-                    query="Based on current sensor data, generate the next navigation instruction."
+                # Agent now returns JSON motor command instead of text instruction
+                agent_response = await self.adk_session_manager.run_agent(
+                    query="Based on current sensor data and pathfinding status, generate the next motor command."
                 )
 
-                # STEP 5.5: Parse and store instruction
-                if instruction and instruction != "No instruction generated":
-                    self.state_manager.add_instruction(instruction)
-                    logger.info(f"Generated instruction: {instruction}")
+                # STEP 5.5: Parse and store motor command
+                if agent_response and agent_response != "No instruction generated":
+                    # Try to parse JSON motor command from agent response
+                    motor_command = self._parse_motor_command(agent_response)
 
-                    # STEP 5.6: Log planning result
-                    logger.debug(f"Planning cycle complete. Instruction queued.")
+                    if motor_command:
+                        # Store motor command in queue
+                        self.state_manager.add_motor_command(motor_command)
+                        logger.info(f"Generated motor command: {motor_command.get('command', 'UNKNOWN')}")
+
+                        # STEP 5.6: Log planning result
+                        logger.debug(f"Planning cycle complete. Motor command queued.")
+                    else:
+                        logger.warning(f"Failed to parse motor command from agent response: {agent_response}")
                 else:
-                    logger.warning("Agent did not generate instruction")
+                    logger.warning("Agent did not generate response")
 
             except Exception as e:
                 logger.error(f"Error in planning loop: {e}", exc_info=True)
@@ -92,6 +122,113 @@ class PlanningLoop:
             await asyncio.sleep(self.interval_seconds)
 
         logger.info("Planning loop stopped")
+
+    def _check_mission_success(self, detected_objects: list) -> dict:
+        """
+        Deterministic check for mission success.
+        Returns mission complete if target object is detected with high confidence and close distance.
+
+        Args:
+            detected_objects: List of DetectedObject instances
+
+        Returns:
+            Dictionary with success status and details
+        """
+        # Extract target object label from mission objective (settings imported at top)
+        objective = self.state_manager.objective.lower()
+
+        # Simple keyword extraction (e.g., "Find a red coffee mug" -> look for "mug" or "cup")
+        # This could be enhanced with NLP
+        target_keywords = []
+        if "mug" in objective or "cup" in objective:
+            target_keywords = ["mug", "cup"]
+        elif "bottle" in objective:
+            target_keywords = ["bottle"]
+        elif "chair" in objective:
+            target_keywords = ["chair"]
+        elif "person" in objective:
+            target_keywords = ["person"]
+        else:
+            # Extract nouns as fallback
+            words = objective.split()
+            target_keywords = [w for w in words if len(w) > 3 and w not in ['find', 'locate', 'search']]
+
+        if not target_keywords:
+            return {"mission_complete": False, "reason": "No target keywords identified"}
+
+        # Check each detected object
+        for obj in detected_objects:
+            obj_label = obj.label.lower()
+
+            # Check if this object matches target
+            if any(keyword in obj_label or obj_label in keyword for keyword in target_keywords):
+                # Check success criteria
+                if (obj.confidence >= settings.success_confidence_threshold and
+                    obj.depth is not None and
+                    obj.depth <= settings.success_distance_threshold):
+
+                    return {
+                        "mission_complete": True,
+                        "object_label": obj.label,
+                        "confidence": obj.confidence,
+                        "distance": obj.depth,
+                        "found_object": obj,
+                        "message": f"Target found: {obj.label} at {obj.depth:.2f}m with {obj.confidence:.2%} confidence"
+                    }
+
+        return {"mission_complete": False, "reason": "Target not found or not close enough"}
+
+    def _parse_motor_command(self, agent_response: str) -> Optional[dict]:
+        """
+        Parse motor command from agent response.
+        Agent should return JSON, but may wrap it in markdown or text.
+
+        Args:
+            agent_response: Raw agent response
+
+        Returns:
+            Parsed motor command dict or None if parsing fails
+        """
+        try:
+            # Try direct JSON parse first
+            try:
+                return json.loads(agent_response)
+            except json.JSONDecodeError:
+                pass
+
+            # Try extracting JSON from markdown code block
+            if "```json" in agent_response:
+                start = agent_response.find("```json") + 7
+                end = agent_response.find("```", start)
+                json_str = agent_response[start:end].strip()
+                return json.loads(json_str)
+            elif "```" in agent_response:
+                start = agent_response.find("```") + 3
+                end = agent_response.find("```", start)
+                json_str = agent_response[start:end].strip()
+                return json.loads(json_str)
+
+            # Try finding JSON object pattern
+            import re
+            json_pattern = r'\{[^}]+\}'
+            matches = re.findall(json_pattern, agent_response, re.DOTALL)
+            if matches:
+                # Try each match
+                for match in matches:
+                    try:
+                        parsed = json.loads(match)
+                        if 'command' in parsed:  # Validate it looks like a motor command
+                            return parsed
+                    except json.JSONDecodeError:
+                        continue
+
+            # If all parsing fails, log and return None
+            logger.warning(f"Could not parse motor command from: {agent_response[:100]}...")
+            return None
+
+        except Exception as e:
+            logger.error(f"Error parsing motor command: {e}")
+            return None
 
     def start(self):
         """Start the planning loop as a background task."""
@@ -167,8 +304,8 @@ async def test_planning_loop():
     await planning_loop.stop()
 
     # Check results
-    print(f"\nGenerated {state_manager.total_instructions_given} instructions")
-    print(f"Instruction queue: {state_manager.instruction_queue}")
+    print(f"\nGenerated {state_manager.total_motor_commands_sent} motor commands")
+    print(f"Motor command queue: {state_manager.motor_command_queue}")
 
     # Clean up
     await adk_manager.end_session()

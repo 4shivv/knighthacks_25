@@ -14,21 +14,30 @@ from pathlib import Path
 # Add parent directory to path to import tools
 sys.path.append(str(Path(__file__).parent.parent))
 from tools.navigation_tools import (
+    # Legacy tools (still useful)
     calculate_distance_to_object,
-    suggest_movement_direction,
     check_path_clear,
-    describe_environment
+    describe_environment,
+    # New D* Lite integration tools
+    check_goal_reached,
+    validate_path_safety,
+    calculate_motor_command_for_waypoint,
+    get_exploration_command
 )
 
 logger = logging.getLogger(__name__)
 
 
 # Define callbacks for the agent
-async def before_agent_callback(context: CallbackContext):
+async def before_agent_callback(**kwargs):
     """
     Called before agent processes request.
     Validates that we have fresh sensor data.
     """
+    context = kwargs.get('callback_context')
+    if not context:
+        return None
+
     # Check if we have fresh sensor data
     has_lidar = context.state.get('temp:last_lidar_timestamp', 0) > 0
     has_camera = context.state.get('temp:last_camera_timestamp', 0) > 0
@@ -44,11 +53,15 @@ async def before_agent_callback(context: CallbackContext):
     return None  # Proceed with agent execution
 
 
-async def after_agent_callback(context: CallbackContext):
+async def after_agent_callback(**kwargs):
     """
     Called after agent generates response.
     Logs the instruction for monitoring.
     """
+    context = kwargs.get('callback_context')
+    if not context:
+        return None
+
     # The response is already in context.response
     if context.response and context.response.parts:
         instruction = ''.join(part.text or '' for part in context.response.parts)
@@ -68,37 +81,77 @@ navigation_agent = LlmAgent(
     # Use Gemini Live API model for streaming support
     model="gemini-2.0-flash-exp",  # Can upgrade to gemini-2.0-flash-live-001 for audio streaming
 
-    # Dynamic instruction using state templating
-    instruction="""You are an AI navigation assistant guiding a blindfolded person to find objects.
+    # Dynamic instruction using state templating (updated for RC car autonomous navigation)
+    instruction="""You are an autonomous navigation decision system for an RC car.
 
 **Current Mission:** {objective}
 
 **Your Role:**
-- Analyze detected objects and their positions
-- Generate ONE clear, concise navigation instruction (<20 words)
-- Use the available tools to calculate distances and suggest directions
-- Prioritize safety (warn about obstacles)
+- Monitor D* Lite pathplanner status and make high-level navigation decisions
+- Override pathplanner when safety requires immediate action
+- Generate structured motor commands or path-following directives
+- Decide between: following planned path, emergency stop, exploration, or replanning
 
-**Available Information:**
+**Current Status:**
+- Position: {current_position}
+- Heading: {current_heading}
+- Velocity: {velocity}
 - Detected objects: {detected_objects_summary}
-- Current position: {current_position}
-- Mission progress: {total_instructions} instructions given
+- Path status: {path_status}
+- Next waypoint: {next_waypoint}
+- Goal position: {goal_position}
+- Path length: {current_path_length} steps
+- Obstacles in path: {obstacles_in_path}
+- Commands sent: {motor_commands_sent}
+- D* Lite replans: {dstar_replans}
 
-**Guidelines:**
-1. If target object is detected and close (<0.5m), say "STOP. You have found the {objective}!"
-2. If target object is visible but far, guide user toward it
-3. If target not visible, suggest turning to scan environment
-4. Always warn about nearby obstacles (<1m)
-5. Be encouraging and clear
+**Decision Logic (choose ONE):**
 
-Generate the next navigation instruction:""",
+1. **MISSION_COMPLETE** - Target found and reached
+   - Condition: Target detected, confidence >0.95, depth <0.5m
+   - Action: Return motor command: {{"command": "STOP", "reason": "MISSION_COMPLETE"}}
+
+2. **FOLLOW_PATH** - Trust D* Lite pathplanner
+   - Condition: path_status="PATH_FOUND", no unexpected obstacles, waypoint available
+   - Action: Return motor command: {{"command": "MOVE_TO_WAYPOINT", "waypoint": <next_waypoint>, "speed": 60}}
+
+3. **EMERGENCY_STOP** - Immediate safety concern
+   - Condition: Unexpected obstacle <0.3m ahead, sensor data stale, or path blocked
+   - Action: Return motor command: {{"command": "EMERGENCY_STOP", "reason": "<why>"}}
+
+4. **REQUEST_REPLAN** - Path invalidated by new obstacles
+   - Condition: path_status="BLOCKED" or obstacles detected in current path
+   - Action: Return motor command: {{"command": "REQUEST_REPLAN", "reason": "Obstacles detected"}}
+
+5. **EXPLORE** - No goal set yet, systematic search
+   - Condition: path_status="NO_GOAL", target not visible
+   - Action: Return motor command: {{"command": "ROTATE_SCAN", "angle": 45, "speed": 30}}
+
+6. **BACKUP_RECOVERY** - RC car stuck or no progress
+   - Condition: Velocity near 0 for multiple cycles, path available but not moving
+   - Action: Return motor command: {{"command": "BACKUP", "distance": 0.3, "speed": 40}}
+
+**Output Format:**
+Return ONLY a valid JSON motor command object. Do not include explanations or additional text.
+
+Example outputs:
+{{"command": "MOVE_TO_WAYPOINT", "waypoint": [2.3, 4.1], "speed": 60}}
+{{"command": "EMERGENCY_STOP", "reason": "Obstacle detected at 0.2m"}}
+{{"command": "STOP", "reason": "MISSION_COMPLETE"}}
+
+Generate motor command:""",
 
     # Provide navigation tools to the agent
     tools=[
+        # Core detection tools
         calculate_distance_to_object,
-        suggest_movement_direction,
         check_path_clear,
-        describe_environment
+        describe_environment,
+        # D* Lite integration tools
+        check_goal_reached,
+        validate_path_safety,
+        calculate_motor_command_for_waypoint,
+        get_exploration_command
     ],
 
     # Save agent's response to state for tracking
@@ -109,7 +162,7 @@ Generate the next navigation instruction:""",
     after_agent_callback=after_agent_callback,
 
     # Agent description
-    description="Navigation agent for guiding blindfolded users to find objects using sensor data"
+    description="Autonomous navigation decision system for RC car pathfinding and obstacle avoidance"
 )
 
 
@@ -134,6 +187,16 @@ def prepare_agent_state(state_manager) -> dict:
     else:
         summary = "No objects detected"
 
+    # Format pathfinding state
+    next_waypoint_str = f"({state_manager.next_waypoint[0]:.1f}, {state_manager.next_waypoint[1]:.1f})" if state_manager.next_waypoint else "None"
+    goal_position_str = f"Grid: {state_manager.goal_position}" if state_manager.goal_position else "Not set"
+
+    # Count obstacles in current path (if path exists)
+    obstacles_in_path = 0
+    if state_manager.current_path and detected_objects:
+        # Simple heuristic: count objects with depth < 1m that might be in the path
+        obstacles_in_path = sum(1 for obj in detected_objects if obj.depth and obj.depth < 1.0)
+
     # Prepare state
     return {
         # Mission info
@@ -146,8 +209,21 @@ def prepare_agent_state(state_manager) -> dict:
         # Position info (string for instruction templating)
         "current_position": f"({state_manager.current_position.x:.1f}, {state_manager.current_position.y:.1f}, {state_manager.current_position.z:.1f})",
 
+        # Pathfinding context (for RC car navigation)
+        "next_waypoint": next_waypoint_str,
+        "path_status": state_manager.path_status,
+        "current_path_length": len(state_manager.current_path),
+        "goal_position": goal_position_str,
+        "obstacles_in_path": obstacles_in_path,
+
+        # Movement context
+        "current_heading": f"{state_manager.current_heading:.1f}°",
+        "velocity": f"{state_manager.velocity:.2f} m/s",
+        "last_motor_command": str(state_manager.last_motor_command) if state_manager.last_motor_command else "None",
+
         # Statistics
-        "total_instructions": state_manager.total_instructions_given,
+        "motor_commands_sent": state_manager.total_motor_commands_sent,
+        "dstar_replans": state_manager.dstar_replan_count,
 
         # Temporary data (for tools to use)
         "temp:detected_objects": [
@@ -159,6 +235,8 @@ def prepare_agent_state(state_manager) -> dict:
             }
             for obj in detected_objects
         ],
+        "temp:current_path": state_manager.current_path,
+        "temp:occupancy_grid_available": state_manager.occupancy_grid is not None,
 
         # Sensor timestamps (for validation)
         "temp:last_lidar_timestamp": state_manager.last_lidar_timestamp,

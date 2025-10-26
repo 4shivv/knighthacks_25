@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     sensor_timeout_ms: int = 2000
     lidar_ws_port: int = 8001
     camera_ws_port: int = 8002
+    camera_width: int = 640
+    camera_height: int = 480
 
     # Server Configuration
     server_host: str = "0.0.0.0"
@@ -43,6 +45,7 @@ class Settings(BaseSettings):
         env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = False
+        extra = "ignore"  # Ignore extra fields in .env
 
 
 # Global settings instance
