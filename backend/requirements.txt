@@ -1,0 +1,17 @@
+# Web Framework
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+websockets>=13.0
+
+# Google AI SDK (ADK + GenAI)
+google-genai>=1.0.0
+
+# Computer Vision & ML
+ultralytics>=8.3.0
+opencv-python>=4.10.0
+numpy>=1.26.0
+
+# Configuration Management
+pydantic>=2.9.0
+pydantic-settings>=2.6.0
+python-dotenv>=1.0.0
